@@ -1891,17 +1891,27 @@ function rollRestoreMoment(phi, config) {
     const frac2 = Math.min((phi - holdRad) / span, 2);
     return -Mmax * (1 - frac2);
   }
+  // Ama-DOWN (phi<0) is deliberately NOT symmetric with the flying case
+  // above. The ramp-down there models righting genuinely vanishing once the
+  // ama leaves the water — nothing is left to push with. A submerged ama is
+  // the opposite: it keeps displacing its own volume no matter how deep it
+  // is pushed, so its buoyant righting moment SATURATES rather than decaying.
+  // Applying the flying-case ramp to this side made the restoring moment fall
+  // through zero and reverse into a capsizing arm, which left any crew moment
+  // above the ama's buoyancy ceiling with no equilibrium at all: crewPos=1.0
+  // (2207 N*m vs the ama's 1962 N*m) capsized to WINDWARD at every deep TWA,
+  // with no angle at which the boat could settle. Holding Mmax restores the
+  // equilibrium the geometry already implies — crewRollMoment carries a
+  // cos(phi), so it falls off with heel and the two curves cross at about
+  // -27deg, well inside phiCapsizeDeg. The capsize timer remains the formal
+  // trigger for this side; it is simply no longer guaranteed to fire.
   const submergeRad = stability.phiSubmergeDeg * DEG__b5;
   const Mmax = ama.maxBuoyancy * g * ama.spacing;
   if (-phi <= submergeRad) {
     const frac = -phi / submergeRad;
     return Mmax * frac * (2 - frac);
   }
-  const holdRad = submergeRad + HOLD_FRAC * (capsizeRad - submergeRad);
-  if (-phi <= holdRad) return Mmax;
-  const span = Math.max(capsizeRad - holdRad, 1e-6);
-  const frac2 = Math.min((-phi - holdRad) / span, 2);
-  return Mmax * (1 - frac2);
+  return Mmax;
 }
 
 // crewRollMoment(phi, crewPos, config) -> N*m. A genuine pendulum torque,
