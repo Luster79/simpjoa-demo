@@ -3228,11 +3228,15 @@ function renderCrewPad() {
 
   // Deck planks (fore-aft) and the two crossbeams (aka, hull->ama) that give
   // the platform its "you stand on this" texture. Planks run the platform's
-  // length; beams span its width, a touch stronger.
+  // length; beams span its width, a touch stronger. The plank count is
+  // derived so each board stays clearly NARROWER than the ama's beam (a real
+  // pjoa's deck slats are), holding regardless of the config's spacing.
+  const boardW = 2 * amaHalfW * 0.7;
+  const nBoards = Math.max(4, Math.round(platW / boardW));
   let planks = '';
-  for (let i = 1; i <= 4; i++) {
-    const px = platX0 + (platW * i) / 5;
-    planks += `<line x1="${f(px)}" y1="${f(vy(platHalf))}" x2="${f(px)}" y2="${f(vy(-platHalf))}" stroke="${beamCol}" stroke-width="0.04" opacity="0.6"/>`;
+  for (let i = 1; i < nBoards; i++) {
+    const px = platX0 + (platW * i) / nBoards;
+    planks += `<line x1="${f(px)}" y1="${f(vy(platHalf))}" x2="${f(px)}" y2="${f(vy(-platHalf))}" stroke="${beamCol}" stroke-width="0.03" opacity="0.55"/>`;
   }
   const beamLine = (xf) => `<line x1="${f(vxAma)}" y1="${f(vy(xf))}" x2="${f(vxHull)}" y2="${f(vy(xf))}" stroke="${beamCol}" stroke-width="0.09"/>`;
 
