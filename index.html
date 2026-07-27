@@ -2812,7 +2812,7 @@ const MS_TO_KN = 1.9438;
 // recording's codeVersion is meaningful (harness/replay.js warns on
 // mismatch) for a downloaded bundle without requiring a build step for
 // plain `python3 -m http.server` development.
-const CODE_VERSION = "98e8052";
+const CODE_VERSION = "98e8052+dirty";
 // BUILD_TIME: same pattern as CODE_VERSION above — tools/bundle.js
 // replaces this with the COMMIT's timestamp (not wall-clock build time),
 // so it stays stable across re-bundling the same commit and always
@@ -3673,6 +3673,19 @@ function drawSideViewInset(state, forces) {
   ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(-halfLpx, -stemRise); ctx.lineTo(-halfLpx - 2, -stemRise - 5); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(halfLpx, -stemRise); ctx.lineTo(halfLpx + 2, -stemRise - 5); ctx.stroke();
+
+  // Longitudinal axis: the boat's fore-aft centreline (a double-ender is
+  // symmetric about it), the reference the CLR and crew read against. Drawn
+  // in the same heeled frame as the hull, dashed and faint. Kept to the deep
+  // mid-body and just below the sheer so it stays inside the silhouette
+  // rather than poking past the rising stems at the ends.
+  const axHalf = halfLpx * 1.02, axY = 0;
+  ctx.save();
+  ctx.setLineDash([5, 2, 1, 2]); // dash-dot: the technical-drawing centreline convention
+  ctx.strokeStyle = 'rgba(150,180,215,0.9)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-axHalf, axY); ctx.lineTo(axHalf, axY); ctx.stroke();
+  ctx.restore();
 
   // Centre of lateral resistance (CLR): the fore-aft point the hull's leeway
   // side force acts through — the pivot core/hydro.js takes its yaw moment
