@@ -652,7 +652,23 @@ function buildDefaultConfig() {
   const aeroTableV2 = loadAeroTable('crab_claw_CL_CD_v2.csv');
   crossCheckAeroTableV2(aeroTableV2);
   const p = loadBoatParamsCSV();
-  const yawInertiaFactor = 0.06; // tunable — fraction of m*L^2 approximating yaw inertia of a slender hull
+  // F8 (work-order-2026-07-30): inertia is now three separate quantities,
+  // derived rather than a single fudge factor. A hull accelerating SIDEWAYS
+  // drags a large body of water with it (added mass); pushing it forward
+  // barely does. The old single 0.06*m*L^2 for yaw was below even a uniform
+  // rod's 1/12, which no mass distribution can justify — added mass only ever
+  // adds. Derivations, for L = 5.5 m and draft = lateralArea/L = 0.327 m:
+  //   added sway mass  ~ rho*pi*draft^2/4 per unit length, x L  = 474 kg
+  //   added yaw inertia = that strip mass integrated with x^2   = 1195 kg.m^2
+  //   rod term          = m*L^2/12                              =  479
+  //   ama at its spacing = ama.mass * spacing^2                 =  156
+  // Surge added mass for a slender body is small (a few % — it is pushing
+  // water aside lengthwise, not broadside); 10% is used. ama.mass is now
+  // included in the translational masses, which it previously was not.
+  const HULL_LATERAL_AREA = 1.8;                        // m^2 — see hull.lateralArea below (same value, needed here first)
+  const draft = HULL_LATERAL_AREA / p.boat_length_m;    // ~0.327 m
+  const addedSwayPerLength = 1025 * Math.PI * draft * draft / 4;  // kg/m, 2D cylinder analogy
+  const dryMass = p.displacement_kg + p.ama_mass_kg;
 
   return {
     configVersion: CONFIG_VERSION,
@@ -666,7 +682,21 @@ function buildDefaultConfig() {
       length: p.boat_length_m,           // 5.5 m
       beam: p.hull_beam_m,                // 0.45 m (see example_proa_parameters.csv)
       displacement: p.displacement_kg,    // 190 kg (see example_proa_parameters.csv)
-      yawInertia: yawInertiaFactor * p.displacement_kg * p.boat_length_m * p.boat_length_m,
+      // massSurge / massSway / yawInertia: see the F8 note above for each
+      // term's derivation. All three are configurable, as the work order asks.
+      massSurge: dryMass + 0.10 * p.displacement_kg,
+      massSway: dryMass + addedSwayPerLength * p.boat_length_m,
+      yawInertia: dryMass * p.boat_length_m * p.boat_length_m / 12
+        + p.ama_mass_kg * p.beam_overall_m * p.beam_overall_m
+        + addedSwayPerLength * Math.pow(p.boat_length_m, 3) / 12,
+      // Windage (F15, docs/adr/0008): the above-water body the air acts on —
+      // hull topsides (~5.5 x 0.25), a standing crew (~0.6), mast and spars
+      // (~0.4), platform edge (~0.2). Beam-on projected area, the orientation
+      // that matters most (a shunt lies the boat across the wind). CD ~0.85 is
+      // the usual bluff-body range for such a collection of shapes.
+      windageArea: 1.8,                    // m^2 — BEAM-ON projected area; tunable estimate, same status as lateralArea
+      windageAreaFrontal: 0.5,             // m^2 — END-ON area (bow, mast section, one crew); windageForce interpolates on sin^2 of the apparent-wind angle
+      windageCD: 0.85,
       wettedSurface: 3.0,                  // m^2 — tunable estimate (slender canoe hull)
       // Cf is no longer a stored constant (round 7, R7-1) — hydro.js
       // computes it per-call from the ITTC-57 model-ship line at the
@@ -757,8 +787,28 @@ function buildDefaultConfig() {
       // 0001) already covers the high-Fr regime with its own separate
       // provenance; no additional guard needed here since side force and
       // longitudinal resistance are independent terms.
-      lateralArea: 1.8,                    // m^2 — hull lateral (broadside) plane area (~length*draft); tunable estimate (no direct measurement of THIS hull's draft)
-      yawDampingCoeff: 900,               // tunable — N*m per (rad/s), scaled by speed
+      lateralArea: HULL_LATERAL_AREA,      // m^2 — hull lateral (broadside) plane area (~length*draft); tunable estimate (no direct measurement of THIS hull's draft)
+      // Yaw damping (F10, work-order-2026-07-30) — replaces the single
+      // yawDampingCoeff: 900 with `r*(1+|u|)`, which was dimensionally
+      // inconsistent (a bare 1 added to m/s) and gave a STOPPED boat full
+      // damping. Split into the two standard manoeuvring terms; see
+      // core/hydro.js yawDamping() for the derivation and for why the
+      // magnitude had to come down (before F9 the steering oar supplied ZERO
+      // yaw damping, so 900 was silently covering the rudder's share too —
+      // measured 52% rudder / 48% hull at u=3, r=0.3 once the oar became a
+      // real foil).
+      // yawDampingCrossFlow is DERIVED, not picked: a hull rotating at r moves
+      // its section at x sideways at r*x, so strip theory over the lateral
+      // plane gives N = 0.5*rho*Cd*draft*r^2 * integral(|x|x^2) =
+      // 0.5*rho*Cd*draft*r^2 * L^4/32. With rho=1025, Cd=crossFlowDragCoeff
+      // (1.1, the same bluff-body value hullSideForce uses), draft =
+      // lateralArea/L = 0.327 m and L = 5.5 m, that is 5276. Halved to 2640:
+      // the full value assumes fully separated cross-flow along the whole
+      // hull, which is an upper bound at the modest yaw rates this boat
+      // actually sees. Order of magnitude is the derivation's; the 0.5 is an
+      // explicit, labelled reduction, not a fitted constant.
+      yawDampingLinear: 150,              // N*m per (m/s * rad/s) — bare-hull circulatory term, vanishes at u=0; the rudder (F9) now supplies most of the circulatory damping
+      yawDampingCrossFlow: 2640,          // N*m per (rad/s)^2 — derived above; present at rest, which is what damps a stationary boat
       clrXFraction: 0.05,                 // tunable — center-of-lateral-resistance offset from CG (aft), fraction of half-length
       // clrDepth (F12, work-order-2026-07-30): depth of the centre of lateral
       // resistance below the waterline. The sail's side force and the hull's
@@ -1104,7 +1154,30 @@ function buildDefaultConfig() {
 
     rudder: {
       maxDeflectionDeg: 35,
-      area: 0.4,                // m^2 — tunable estimate, steering-oar blade
+      // area (F9, work-order-2026-07-30): 0.4 m^2 was an unanchored "tunable
+      // estimate" and is a DINGHY RUDDER blade, not a hand-held steering oar —
+      // it is what produced 2.2 kN (1.2 g on this boat) at 6 kn, eight times
+      // the sail's own side force. A Polynesian steering paddle's blade is
+      // roughly 0.75 m x 0.20 m. ADR 0005's coeff stays as derived; this is
+      // the term that was wrong.
+      area: 0.15,               // m^2 — steering-oar blade (~0.75 x 0.20 m)
+      // stallAngleDeg (F9): a low-AR (~1.5) plate separates around 20-25deg;
+      // past it core/rudder.js's lift shape falls away instead of climbing to
+      // the mechanical limit. Below it the shape is exactly the old
+      // sin(deflection), so ADR 0005's slope derivation is untouched.
+      stallAngleDeg: 22,
+      // Blade drag (F9): steering was previously free — rudderForce returned
+      // no Fx at all. CD0 is a thin plate's parasitic drag; inducedK gives the
+      // lift-induced part, so hard steering costs speed and hard-over-past-
+      // stall costs a lot of it.
+      // CD0 referenced to the blade's PLANFORM area: skin friction on both
+      // faces (~2*Cf ~ 0.008) plus section/form drag for a plain oar blade.
+      // 0.02 is that; an initial 0.05 was measured to make a CENTRED oar 22%
+      // of total drag, which is bluff-strut territory, not a blade.
+      CD0: 0.02,
+      // inducedK ~ 1/(pi*AR*e) with AR~1.5 and e~0.7 gives 0.30; 0.35 keeps a
+      // little margin for a square-tipped blade.
+      inducedK: 0.35,
       // coeff: round 10b (D3, docs/adr/0005) — derived, not felt. The blade
       // is a low-AR (~1-2) lifting surface; core/rudder.js's CL(deflection)
       // = coeff*sin(deflection) stays in the small/moderate-angle range
@@ -1566,6 +1639,49 @@ function sailCoefficients(alpha, controls, config) {
 //   sign — NOT the sailor's angle of attack (it reads ~140-170deg on normal
 //   courses, see aero.js header comment). alphaSailor: the acute [0, pi/2]
 //   angle a sailor/UI would call AoA (FIX_REQUEST_step1_round2.md R2-3).
+// windageForce(state, controls, config) -> { Fx, Fy } in the boat frame.
+//
+// F15 (work-order-2026-07-30, docs/adr/0008). `grep -rn "rho_air" core/`
+// returned exactly TWO hits before this: the constant's definition and the
+// sail's own dynamic pressure. Nothing else in the model felt the air at all —
+// no hull topsides, no crew, no mast, no spars.
+//
+// Two consequences, both real:
+//   - A furled rig had only the sail's own residual CD standing in for the
+//     whole boat's air drag.
+//   - shuntForceFade() returns EXACTLY 0 through the 'transfer' and 'swap'
+//     phases, which is 8.4 s of a 16.4 s shunt. Fading the sail's LIFT there
+//     is right (the rig is being carried across, not working), but with no
+//     windage the boat felt no air force whatever while lying beam-on with a
+//     flogging rig — so the most exposed moment of the whole manoeuvre was
+//     safe by construction. This term is deliberately NOT faded, so it stays
+//     through the shunt.
+//
+// Applied along the apparent wind, i.e. pure drag on the above-water body. It
+// is not always a retarding force: on a broad reach the apparent wind has a
+// forward component and windage pushes the boat along, which is the physically
+// correct behaviour and the reason it belongs in Fx/Fy rather than in the
+// resistance term.
+function windageForce(state, controls, config) {
+  const { windageArea, windageAreaFrontal, windageCD } = config.hull;
+  if (!windageArea || !windageCD) return { Fx: 0, Fy: 0 };
+  const aw = apparentWind(state, controls);
+  if (aw.speed < 1e-6) return { Fx: 0, Fy: 0 };
+  // The exposed area depends on which way the air meets the boat: end-on it
+  // sees a bow, a mast section and a crew member; beam-on it sees the whole
+  // topside. Interpolating on sin^2 of the apparent-wind angle is the usual
+  // treatment and matters a lot here — using the beam-on figure at every
+  // angle overstates windage worst exactly where the apparent wind is
+  // strongest (close-hauled), which measured as a 21-33% speed loss upwind
+  // before this was added.
+  const sinA = Math.sin(aw.angleToBoat);
+  const areaEff = windageAreaFrontal + (windageArea - windageAreaFrontal) * sinA * sinA;
+  const q = 0.5 * config.rho_air * areaEff * windageCD * aw.speed;
+  // q already carries one power of speed; multiplying by the velocity
+  // COMPONENTS below supplies the second and the direction at once.
+  return { Fx: q * aw.vx, Fy: q * aw.vy };
+}
+
 function sailForces(state, controls, config) {
   const aw = apparentWind(state, controls);
   const delta = Math.abs(state.delta ?? 0); // actual yard angle magnitude, R5-1 — reused below for CE geometry (P1.2)
@@ -2050,37 +2166,139 @@ function amaDrag(u, phi, crewPos, end, config) {
   return { Fx, yawMoment };
 }
 
+// yawDamping(r, u, config) -> N*m, the BARE HULL's resistance to yawing.
+//
+// F10 (work-order-2026-07-30) replaced `-yawDampingCoeff * r * (1 + |u|)`.
+// Two faults. Dimensionally, `1 + |u|` adds a bare 1 to a speed in m/s, so the
+// expression has no consistent units and does not survive a change of them.
+// Physically, the consequence: at u = 0 it still returned FULL damping
+// (-270 N*m at r = 0.3), i.e. a boat sitting still resisted being spun as if
+// it were making way.
+//
+// Standard manoeuvring form instead, two terms with distinct physics:
+//   N_r    * u * r      — the lifting/circulatory term. Needs flow over the
+//                         hull, so it vanishes at u = 0, as it must.
+//   N_rr   * r * |r|    — cross-flow drag on the hull's own transverse motion
+//                         as it rotates. Quadratic in r, and present at rest,
+//                         which is what actually damps a stationary boat.
+//
+// The coefficient also had to SHRINK, not carry over. The old 900 was doing
+// two jobs: the hull's own damping and, silently, the rudder's — because
+// before F9 the steering oar contributed exactly zero yaw damping (no inflow
+// term at all). With F9's oar in the water the measured split at u = 3,
+// r = 0.3 is 52% rudder / 48% hull, so leaving 900 in place would double-count
+// the half the oar now supplies. These values keep the bare hull (oar shipped)
+// damping in the same range it had, while the deployed oar adds its own real
+// contribution on top rather than being stood in for.
 function yawDamping(r, u, config) {
-  return -config.hull.yawDampingCoeff * r * (1 + Math.abs(u));
+  const { hull } = config;
+  const linear = hull.yawDampingLinear * Math.abs(u) * r;
+  const crossFlow = hull.yawDampingCrossFlow * r * Math.abs(r);
+  return -(linear + crossFlow);
 }
 
 
 // ==== core/rudder.js ====
-// rudder.js — steering oar at the active leeward "stern" end. Force scales
-// with deflection and u*|u| (so it flips sign with flow reversal and goes
-// dead as |u| -> 0, without an artificial cutoff). After a shunt, state.end
-// flips, moving the lever arm (and hence the active steering end) to the
-// opposite physical hull end.
+// rudder.js — steering oar at the active leeward "stern" end. After a shunt,
+// state.end flips, moving the lever arm (and hence the active steering end) to
+// the opposite physical hull end.
 //
 // controls.rudderUp: a Pjoa's "rudder" is a steering OAR, not a fixed,
 // always-in-the-water blade — its normal resting state is shipped
 // (lifted clear of the water entirely), not "centered". While shipped it
 // cannot generate any force regardless of controls.rudder's own value,
 // same as a real oar pulled out of its lashing.
+//
+// F9 (work-order-2026-07-30) rebuilt this as a proper foil. The previous model
+// was `Fy = coeff * 0.5*rho*area * u*|u| * sin(deflection)`, with three
+// separate defects, all measured at u=3 m/s and full 35deg:
+//   1. 2222 N of side force — 1.2 g laterally on a 190 kg boat, and 8x the
+//      sail's own side force at TWS 8. Not a load a human holds on an oar.
+//   2. No stall: force grew monotonically to the mechanical limit, though a
+//      blade of this aspect ratio separates around 20-25deg.
+//   3. No drag term at all (the function returned only Fy/yawMoment), so
+//      steering was free; and no inflow term, so the oar produced ZERO yaw
+//      damping — a centred oar at r=0.3 rad/s gave exactly 0.00 N. That
+//      absence is precisely why the artificial hull yawDamping ride-along
+//      (F10) had to carry all of it.
+//
+// ADR 0005's coeff=2.1 is NOT the problem and is kept unchanged: it is a
+// derived low-AR lift-curve slope, and CL(35deg)=1.20 sits inside Hoerner's
+// measured CLmax band for AR 1-2 plates. The excess force came from `area`,
+// an unanchored 0.4 m^2 "tunable estimate" — that is a dinghy rudder blade,
+// not a hand-held steering oar (see config.js for the replacement).
+
+// Blade lift shape vs EFFECTIVE angle of attack, with stall. Below the stall
+// angle this is exactly the old sin(alpha), so ADR 0005's slope derivation
+// carries over untouched; past it, lift falls away instead of climbing
+// forever, as a separated low-AR plate does.
+function bladeLiftShape(alphaRad, stallRad) {
+  const a = Math.abs(alphaRad);
+  if (a <= stallRad) return Math.sin(alphaRad);
+  const peak = Math.sin(stallRad);
+  const t = Math.min((a - stallRad) / (Math.PI / 2 - stallRad), 1);
+  return Math.sign(alphaRad) * peak * (1 - 0.45 * t);
+}
 
 function rudderForce(state, controls, config) {
-  if (controls.rudderUp) return { Fy: 0, yawMoment: 0 };
+  if (controls.rudderUp) return { Fx: 0, Fy: 0, yawMoment: 0 };
   const { rudder, rho_w, hull } = config;
   const maxDeflection = (rudder.maxDeflectionDeg * Math.PI) / 180;
   const deflection = Math.max(-1, Math.min(1, controls.rudder)) * maxDeflection;
 
-  const { u } = state;
-  const Fy = rudder.coeff * 0.5 * rho_w * rudder.area * u * Math.abs(u) * Math.sin(deflection);
+  // The oar sits at the physical end opposite the active bow, so the water it
+  // meets carries the yaw-rate contribution r*leverArm as well as the boat's
+  // own sway. Including it is what gives the oar real yaw damping.
+  const leverArm = -(hull.length / 2) * state.end;
+  const u = state.u;
+  const vAtRudder = state.v + state.r * leverArm;
+  const V2 = u * u + vAtRudder * vAtRudder;
+  if (V2 < 1e-6) return { Fx: 0, Fy: 0, yawMoment: 0 };
+  const V = Math.sqrt(V2);
 
-  const leverArm = (hull.length / 2) * state.end;
+  // Effective angle of attack. The flow already arrives at inflowAngle, so the
+  // blade's AoA combines that with its own deflection — and with the oar
+  // CENTRED it is nonzero on its own, which is where the damping and the
+  // weathercocking come from.
+  //
+  // The lever sign matters here in a way it never did before. The oar is at
+  // the PHYSICAL STERN, -(L/2) from the centre (which is where drawBoat()
+  // has always drawn it); the previous code used +(L/2). With no inflow term
+  // that was invisible — only the deflection mattered, and the sign was
+  // absorbed into the steering convention. With an inflow term it is not:
+  // leeway and yaw-rate both enter through vAtRudder, and only the physical
+  // stern position makes the two agree. Verified by exhausting the sign
+  // combinations against the three properties the model must have:
+  //   - positive `controls.rudder` gives a positive yaw moment, matching the
+  //     previous model and therefore every steering test and the UI;
+  //   - leeway alone, oar centred, WEATHERCOCKS (bow follows the flow)
+  //     rather than rounding up;
+  //   - yaw rate alone, oar centred, DAMPS.
+  // With the old +(L/2) lever no combination satisfies all three: an
+  // intermediate revision of this rewrite got steering and weathercocking
+  // right but produced ANTI-damping, and one before that produced a slow
+  // unforced round-up (TWA 90 -> 62 in 30 s) that collapsed the boat to
+  // 0.5 m/s. Both were measured, not reasoned about.
+  const inflowAngle = Math.atan2(vAtRudder, u);
+  const alphaEff = deflection + inflowAngle;
+
+  const stallRad = (rudder.stallAngleDeg * Math.PI) / 180;
+  const CL = rudder.coeff * bladeLiftShape(alphaEff, stallRad);
+  const CD = rudder.CD0 + rudder.inducedK * CL * CL;
+
+  // Flow frame, same construction aero.js uses for the sail: drag along the
+  // relative flow past the blade, lift 90deg CCW from it. Because both
+  // directions are built from the actual flow, the sign flip after a shunt
+  // (u < 0) falls out on its own, as it did from u*|u| before.
+  const q = 0.5 * rho_w * rudder.area * V2;
+  const dragX = -u / V, dragY = -vAtRudder / V;
+  const liftX = -dragY, liftY = dragX;
+
+  const Fx = q * (CD * dragX + CL * liftX);
+  const Fy = q * (CD * dragY + CL * liftY);
   const yawMoment = Fy * leverArm;
 
-  return { Fy, yawMoment };
+  return { Fx, Fy, yawMoment };
 }
 
 
@@ -2516,9 +2734,10 @@ function computeForces(state, controls, config) {
   const drag = amaDrag(state.u, state.phi, controls.crewPos, state.end, config);
   const rudder = rudderForce(state, controls, config);
   const damp = yawDamping(state.r, state.u, config);
+  const windage = windageForce(state, controls, config);
 
-  const Fx = aero.Fx + resist + side.Fx + drag.Fx;
-  const Fy = aero.Fy + side.Fy + rudder.Fy;
+  const Fx = aero.Fx + resist + side.Fx + drag.Fx + rudder.Fx + windage.Fx;
+  const Fy = aero.Fy + side.Fy + rudder.Fy + windage.Fy;
   const M = aero.yawMoment + side.yawMoment + rudder.yawMoment + damp + drag.yawMoment;
 
   // Roll dynamics (4th DOF, FIX_REQUEST_round4_roll_dof.md Part 1):
@@ -2544,22 +2763,34 @@ function computeForces(state, controls, config) {
       hullResist: { Fx: resist },
       hullSide: { Fx: side.Fx, Fy: side.Fy, yawMoment: side.yawMoment },
       amaDrag: { Fx: drag.Fx, yawMoment: drag.yawMoment },
-      rudder: { Fy: rudder.Fy, yawMoment: rudder.yawMoment },
+      rudder: { Fx: rudder.Fx, Fy: rudder.Fy, yawMoment: rudder.yawMoment },
       yawDamping: { M: damp },
+      windage: { Fx: windage.Fx, Fy: windage.Fy },
       roll: { Msail, Mrestore, Mcrew, Mdamp, Mroll },
     },
   };
 }
 
 // derivatives(state, forces, config) -> time derivatives of the ODE state
+// F8 (work-order-2026-07-30): three SEPARATE inertias, not one displacement.
+// A hull accelerating sideways drags a large body of water with it; pushing it
+// forward barely does. Previously m_x = m_y = displacement = 190 kg and
+// I_z = 0.06*m*L^2 = 345 kg.m^2 — the latter BELOW even a uniform rod (1/12),
+// which no mass distribution can justify once added mass is counted, since
+// added mass only ever adds.
+//
+// Writing the rigid-body equations with distinct inertias also produces the
+// MUNK MOMENT on its own — the (m_x - m_y)*u*v term in dr, the classical
+// destabilising moment on a slender body at an angle of attack. It was
+// identically zero before, and not because it was neglected: with m_x = m_y
+// there was nothing to express it with.
 function derivatives(state, forces, config) {
-  const m = config.hull.displacement;
-  const I = config.hull.yawInertia;
+  const { massSurge, massSway, yawInertia } = config.hull;
   const Iroll = config.stability.I_roll;
   return {
-    du: forces.Fx / m + state.v * state.r,
-    dv: forces.Fy / m - state.u * state.r,
-    dr: forces.M / I,
+    du: forces.Fx / massSurge + (massSway / massSurge) * state.v * state.r,
+    dv: forces.Fy / massSway - (massSurge / massSway) * state.u * state.r,
+    dr: (forces.M + (massSurge - massSway) * state.u * state.v) / yawInertia,
     dx: state.u * Math.cos(state.heading) - state.v * Math.sin(state.heading),
     dy: state.u * Math.sin(state.heading) + state.v * Math.cos(state.heading),
     dheading: state.r,
@@ -3046,14 +3277,14 @@ const MS_TO_KN = 1.9438;
 // recording's codeVersion is meaningful (harness/replay.js warns on
 // mismatch) for a downloaded bundle without requiring a build step for
 // plain `python3 -m http.server` development.
-const CODE_VERSION = "3bba7d4+dirty";
+const CODE_VERSION = "c1560e6";
 // BUILD_TIME: same pattern as CODE_VERSION above — tools/bundle.js
 // replaces this with the COMMIT's timestamp (not wall-clock build time),
 // so it stays stable across re-bundling the same commit and always
 // matches CODE_VERSION's hash. Shown in the bottom-right version footer
 // so a bug report/recording can be tied to an exact, dated build without
 // having to separately ask "which commit was this."
-const BUILD_TIME = "2026-08-02T17:17:11+02:00";
+const BUILD_TIME = "2026-08-02T19:14:12+02:00";
 
 // ---------------------------------------------------------------------
 // i18n — EN/PL. Static labels are marked with data-i18n="key" in
@@ -5624,7 +5855,13 @@ function drawPolarView(rows) {
 const BOAT_FIELDS = [
   { path: 'hull.length', kind: 'physics', unit: 'm', step: 0.1, labelEn: 'Hull length', labelPl: 'Długość kadłuba' },
   { path: 'hull.beam', kind: 'graphics', unit: 'm', step: 0.01, labelEn: 'Hull beam', labelPl: 'Szerokość kadłuba' },
-  { path: 'hull.displacement', kind: 'physics', unit: 'kg', step: 1, labelEn: 'Displacement', labelPl: 'Wyporność' },
+  // F8: these three are what the dynamics actually integrate. hull.displacement
+  // is no longer read by the physics — it is only an input to the derivation in
+  // config.js — so editing it here would silently do nothing; the derived
+  // inertias are exposed instead.
+  { path: 'hull.massSurge', kind: 'physics', unit: 'kg', step: 5, labelEn: 'Mass, surge (m_x)', labelPl: 'Masa wzdłużna (m_x)' },
+  { path: 'hull.massSway', kind: 'physics', unit: 'kg', step: 10, labelEn: 'Mass, sway (m_y, incl. added)', labelPl: 'Masa poprzeczna (m_y, z towarzyszącą)' },
+  { path: 'hull.yawInertia', kind: 'physics', unit: 'kg·m²', step: 50, labelEn: 'Yaw inertia (I_z)', labelPl: 'Bezwładność yaw (I_z)' },
   { path: 'hull.wettedSurface', kind: 'physics', unit: 'm²', step: 0.1, labelEn: 'Hull wetted surface', labelPl: 'Pow. zwilżona kadłuba' },
   { path: 'hull.residuaryPeakCr', kind: 'physics', unit: '', step: 0.0005, labelEn: 'Wave-resistance peak (Cr)', labelPl: 'Szczyt oporu falowego (Cr)' },
   { path: 'hull.residuaryFrPeak', kind: 'physics', unit: '', step: 0.01, labelEn: 'Peak Froude number', labelPl: 'Liczba Froude’a szczytu oporu' },
@@ -5642,7 +5879,8 @@ const BOAT_FIELDS = [
   { path: 'hull.sailingFreeReliefFadeEndDeg', kind: 'physics', unit: '°', step: 1, labelEn: '"Sailing free" fade-out angle', labelPl: 'Kąt zaniku "żeglowania swobodnego"' },
   { path: 'hull.crossFlowDragCoeff', kind: 'physics', unit: '', step: 0.05, labelEn: 'Cross-flow (broadside) drag coeff.', labelPl: 'Współcz. oporu poprzecznego (na boku)' },
   { path: 'hull.lateralArea', kind: 'physics', unit: 'm²', step: 0.1, labelEn: 'Hull lateral (projected side) area', labelPl: 'Pow. boczna kadłuba (rzut)' },
-  { path: 'hull.yawDampingCoeff', kind: 'physics', unit: '', step: 10, labelEn: 'Yaw damping coeff.', labelPl: 'Tłumienie odchylenia (yaw)' },
+  { path: 'hull.yawDampingLinear', kind: 'physics', unit: '', step: 10, labelEn: 'Yaw damping (speed term)', labelPl: 'Tłumienie yaw (człon prędkościowy)' },
+  { path: 'hull.yawDampingCrossFlow', kind: 'physics', unit: '', step: 50, labelEn: 'Yaw damping (cross-flow)', labelPl: 'Tłumienie yaw (poprzeczne)' },
   { path: 'hull.clrXFraction', kind: 'physics', unit: '', step: 0.01, labelEn: 'CLR offset (fraction)', labelPl: 'Przesunięcie CLR (ułamek)' },
   { path: 'hull.crewForeAftTrimCoeff', kind: 'physics', unit: '', step: 0.01, labelEn: 'Crew fore-aft CLR trim coeff.', labelPl: 'Współcz. przesuwu CLR przez załogę' },
   { path: 'hull.crewTrimSign', kind: 'physics', unit: '±1', step: 2, labelEn: 'Crew-trim coupling sign', labelPl: 'Znak sprzężenia załoga→CLR' },
